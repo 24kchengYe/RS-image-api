@@ -1,0 +1,53 @@
+© Google
+import os
+import requests
+from PIL import Image
+from io import BytesIO
+import random
+
+# Use your Google Maps API here
+GOOGLE_MAPS_API_URL = "https://maps.googleapis.com/maps/api/staticmap"
+API_KEY = ''
+
+IMAGE_SIZE = "512x512"
+ZOOM_LEVEL = 21
+
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.101 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 6.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36'
+]
+
+def download_image(lat, lng, zoom=ZOOM_LEVEL, size=IMAGE_SIZE):
+    params = {
+        'center': f"{lat},{lng}",
+        'zoom': zoom,
+        'size': size,
+        'maptype': 'satellite',
+        'key': API_KEY
+    }
+
+    headers = {
+        'User-Agent': random.choice(USER_AGENTS)
+    }
+
+    response = requests.get(GOOGLE_MAPS_API_URL, params=params, headers=headers)
+
+    if response.status_code == 200:
+        image = Image.open(BytesIO(response.content))
+        return image
+    else:
+        raise Exception(f"Q（State Code: {response.status_code}）")
+
+
+def save_image(image, file_path):
+    image.save(file_path)
+
+if __name__ == "__main__":
+    lat = 37.7749
+    lng = -122.4194
+    try:
+        image = download_image(lat, lng)
+        image_path = "sf_satellite_image.png"
+        save_image(image, image_path)
+    except Exception as e:
+        print(f"Q: {e}")
