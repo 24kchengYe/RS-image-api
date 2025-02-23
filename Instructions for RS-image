@@ -5,7 +5,7 @@ from PIL import Image
 from io import BytesIO
 import random
 
-# Use your Google Maps API here
+# Use your Google API here
 GOOGLE_MAPS_API_URL = "https://maps.googleapis.com/maps/api/staticmap"
 API_KEY = ''
 
