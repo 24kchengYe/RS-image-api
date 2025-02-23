@@ -6,7 +6,7 @@ from io import BytesIO
 import random
 
 # Use your Google API here
-GOOGLE_MAPS_API_URL = "https://maps.googleapis.com/maps/api/staticmap"
+GOOGLE_API_URL = "https://maps.googleapis.com/maps/api/staticmap"
 API_KEY = ''
 
 IMAGE_SIZE = "512x512"
@@ -30,7 +30,7 @@ def download_image(lat, lng, zoom=ZOOM_LEVEL, size=IMAGE_SIZE):
         'User-Agent': random.choice(USER_AGENTS)
     }
 
-    response = requests.get(GOOGLE_MAPS_API_URL, params=params, headers=headers)
+    response = requests.get(GOOGLE_API_URL, params=params, headers=headers)
 
     if response.status_code == 200:
         image = Image.open(BytesIO(response.content))
