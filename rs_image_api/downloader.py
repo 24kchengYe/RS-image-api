@@ -8,6 +8,9 @@ from pathlib import Path
 import requests
 from PIL import Image
 
+# 解除 PIL 像素数限制 (大区域高zoom下会超过默认限制)
+Image.MAX_IMAGE_PIXELS = None
+
 from .tile_system import (
     lat_lng_to_pixel, pixel_to_lat_lng, pixel_to_tile,
     bbox_to_tiles, meters_per_pixel, TILE_SIZE

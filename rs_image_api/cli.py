@@ -151,11 +151,11 @@ def cmd_download(args):
             res_str = f"{result['resolution_m']:.2f}m/px"
             size_str = f"{result['file_size_mb']:.1f}MB"
             date_str = f", {year}" if year else ""
-            print(f"  ✓ {result['width_px']}x{result['height_px']}px, z{actual_zoom}, "
+            print(f"  [OK] {result['width_px']}x{result['height_px']}px, z{actual_zoom}, "
                   f"{res_str}, {size_str}{date_str}")
 
         except Exception as e:
-            print(f"  ✗ 错误: {e}")
+            print(f"  [FAIL] Error: {e}")
             fail += 1
 
     # 写 CSV
