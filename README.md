@@ -1,18 +1,16 @@
 # RS-image-api
 
-Multi-source Remote Sensing Imagery Downloader — 多源遥感影像批量下载工具
+Multi-source Remote Sensing Imagery Downloader — download satellite imagery with precise capture dates.
 
-Download high-resolution satellite imagery from multiple providers with a unified CLI interface.
+## Why this tool?
 
-## Features
-
-- **Multi-provider support**: Google Maps, Bing Maps, Esri World Imagery, Tianditu (天地图)
-- **Auto zoom detection**: Automatically finds the highest available zoom level
-- **Date metadata**: Extracts capture date from Bing Maps headers
-- **Batch download**: Process multiple regions from Shapefile/GeoPackage directories
-- **Resume support**: Skips already-downloaded files
-- **GeoTIFF output**: WGS-84 georeferenced TIFF + world file (.tfw) + projection (.prj)
-- **Overture Maps aligned**: Bing imagery perfectly aligns with Overture Maps building footprints
+| Problem | Solution |
+|---------|----------|
+| Google Maps tiles don't tell you when the image was taken | **GE Historical backend** queries exact capture dates from Google Earth |
+| Bing Maps only reaches z19 in remote areas | **Auto zoom detection** finds the highest real resolution per location |
+| Downloaded TIFFs are 9 GB uncompressed | **GE Historical** outputs JPEG-compressed GeoTIFFs (~30x smaller) |
+| You need imagery for 85 villages | **Batch mode** reads a directory of shapefiles and downloads them all |
+| Individual TIFFs are scattered | **VRT merge** creates a virtual layer for QGIS/ArcGIS |
 
 ## Quick Start
 
@@ -20,56 +18,135 @@ Download high-resolution satellite imagery from multiple providers with a unifie
 # Install
 pip install -e .
 
-# Probe — check available imagery at a location
-python -m rs_image_api probe --lat 28.78 --lng 83.72
+# Check what tools are available
+rs-image info
 
-# Download single bbox
-python -m rs_image_api download --provider google --bbox 83.71,28.77,83.74,28.79 --zoom 20 -o ./output
+# Probe a location — find best zoom + all available dates
+rs-image probe --lat 28.78 --lng 83.72 --backend gehi
 
-# Batch download from directory of GeoPackage files
-python -m rs_image_api download --provider bing --shapefile ./bbox_dir/ --zoom auto -o ./output
+# Batch download from a directory of GeoPackage files
+rs-image batch -i ./bbox_dir/ -b gehi -o ./output/
+
+# Generate VRT for merged viewing in QGIS
+rs-image merge -i ./output/
 ```
 
-## Providers
+## Backends
 
-| Provider | Max Zoom | Date Info | Notes |
-|----------|----------|-----------|-------|
-| `google` | 21 (~0.07m) | ✗ | Highest resolution, global |
-| `bing` | 19-20 | ✓ (YYMM) | Aligned with Overture Maps |
-| `esri` | 20 | ✗ | Maxar/DigitalGlobe source |
-| `tianditu` | 18 | ✗ | Best for China (needs API token) |
+### GE Historical (recommended)
 
-## Output Format
+Uses [GEHistoricalImagery](https://github.com/Mbucari/GEHistoricalImagery) CLI to access Google Earth's historical imagery API. This is the best backend because it provides:
 
-Each downloaded region produces 3 files:
-- `{name}_{provider}_z{zoom}[_{year}].tif` — Imagery
-- `{name}_{provider}_z{zoom}[_{year}].tfw` — World file (geo-positioning)
-- `{name}_{provider}_z{zoom}[_{year}].prj` — Projection (WGS-84)
+- **Exact capture dates** per location (e.g., `2025/02/03`)
+- **Real zoom detection** — distinguishes genuine z20 from interpolated upscales
+- **JPEG-compressed GeoTIFF** output with embedded projection (no .tfw/.prj needed)
+- **Date-aware file naming** — `village_ge_z20_20250203.tif`
 
-Plus a `metadata.csv` summarizing all downloads.
+```bash
+# Install GEHistoricalImagery (one-time setup)
+# Download from: https://github.com/Mbucari/GEHistoricalImagery/releases
+# Extract to D:/tools/gehi2/gdal/ (or set GEHI_EXE env var)
+
+# Probe all available dates at a location
+rs-image probe --lat 29.04 --lng 84.01 --backend gehi
+
+# Batch download — auto-detects best zoom + latest date per region
+rs-image batch -i ./gpkg_dir/ -b gehi -o ./output/
+```
+
+### Tile-based Backends (Bing, Google, Esri)
+
+Download satellite tiles directly from map providers and stitch into GeoTIFFs.
+
+| Provider | Real Max Zoom | Capture Date | Coordinate System |
+|----------|:------------:|:------------:|:-----------------:|
+| `bing` | z19 (z20 sparse) | YYMM (z19 only) | WGS-84 (Overture aligned) |
+| `google` | z20 (z21 = upscale) | None | WGS-84 (GCJ-02 in China) |
+| `esri` | z19-20 | None | WGS-84 |
+| `tianditu` | z18 | None | CGCS2000 (needs API token) |
+
+```bash
+# Single bbox download
+rs-image download --provider bing --bbox 83.71,28.77,83.74,28.79 --zoom 19 -o ./output/
+
+# Batch with Bing (files include capture year from HTTP headers)
+rs-image batch -i ./gpkg_dir/ -b bing -o ./output/
+```
 
 ## CLI Reference
 
-### `probe` — Check imagery availability
+### `rs-image info`
+Show detected tools (GEHistoricalImagery path, PROJ_LIB, rasterio).
 
+### `rs-image probe`
 ```bash
-python -m rs_image_api probe --lat <latitude> --lng <longitude> [--provider google|bing|esri|all]
+rs-image probe --lat <LAT> --lng <LNG> [--backend gehi|bing|google|esri|all]
 ```
+Check imagery availability. Shows best zoom, resolution, and capture dates.
 
-### `download` — Download imagery
-
+### `rs-image batch`
 ```bash
-python -m rs_image_api download \
-  --provider <google|bing|esri|tianditu> \
-  --bbox <lng_min,lat_min,lng_max,lat_max> | --shapefile <path_or_dir> \
-  --zoom <auto|number> \
-  -o <output_directory>
+rs-image batch -i <GPKG_DIR> -b <BACKEND> -o <OUTPUT_DIR> [--probe-only]
 ```
+Batch workflow: collect regions → probe best zoom/date → download → generate VRT.
 
-## Coordinate Systems
+### `rs-image merge`
+```bash
+rs-image merge -i <TIFF_DIR> [-o merged.vrt] [--pattern "*.tif"]
+```
+Generate a GDAL VRT (Virtual Raster) that combines all TIFFs into one layer.
 
-- **Nepal, US, Europe, etc.**: All providers output WGS-84 directly (no offset)
-- **China (mainland)**: Google Maps uses GCJ-02 (offset ~5-10m). Bing Maps is WGS-84. Use Bing for China if you need alignment with Overture/OSM data.
+### `rs-image download`
+```bash
+rs-image download --provider <google|bing|esri> --bbox <LNG_MIN,LAT_MIN,LNG_MAX,LAT_MAX> [--zoom auto|N] -o <DIR>
+```
+Download a single bounding box using tile-based providers.
+
+## Output Format
+
+**GE Historical backend:**
+- `{name}_ge_z{zoom}_{YYYYMMDD}.tif` — Compressed GeoTIFF with embedded CRS
+
+**Tile-based backends:**
+- `{name}_{provider}_z{zoom}[_{year}].tif` — Image
+- `{name}_{provider}_z{zoom}[_{year}].tfw` — World file
+- `{name}_{provider}_z{zoom}[_{year}].prj` — WGS-84 projection
+
+**Batch output also includes:**
+- `download_plan.csv` — Zoom/date plan for all regions
+- `merged.vrt` — Virtual raster for QGIS/ArcGIS
+
+## Real-world Benchmark
+
+Downloading 85 villages in Nepal's Mustang region:
+
+| Backend | Resolution | Total Size | Date Info | Time |
+|---------|-----------|-----------|-----------|------|
+| GE Historical z19-20 | 0.13-0.26 m/px | **314 MB** | Exact (2017-2025) | ~1.5 hr |
+| Bing z19 | 0.30 m/px | 799 MB | YYMM (2022-2023) | ~4 hr |
+| Google tiles z20 | 0.13 m/px | 9.4 GB | None | ~5 hr |
+
+GE Historical is the clear winner: smallest files, precise dates, highest quality.
+
+## Python API
+
+```python
+from rs_image_api.gehi import gehi_find_best, gehi_download
+from rs_image_api.batch import collect_tasks, probe_tasks, download_tasks
+from rs_image_api.merge import generate_vrt
+from rs_image_api.providers import get_provider
+
+# Find best imagery at a location
+result = gehi_find_best(lat=28.78, lng=83.73)
+# {'best_zoom': 19, 'latest_date': '2020/10/05', 'all_dates': [...]}
+
+# Download specific date
+gehi_download(
+    bbox=(83.71, 28.77, 83.74, 28.79),
+    zoom=19, date="2020/10/05",
+    output_path="jomsom.tif"
+)
+```
 
 ## License
 

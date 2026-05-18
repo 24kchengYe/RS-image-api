@@ -74,13 +74,15 @@ class TileProvider:
 class GoogleProvider(TileProvider):
     """
     Google Maps Satellite Tiles
-    - 全球覆盖，zoom 通常到 20-21
-    - 尼泊尔/国外区域: WGS-84 (无偏移)
-    - 中国区域: GCJ-02 (有偏移，需纠正)
+    - z20 is the real max; z21+ are interpolated upscales (not extra detail)
+    - Outside China: WGS-84 (no offset)
+    - China mainland: GCJ-02 (5-10m offset)
+    - No capture date in response headers
+    - For dated imagery, use GEHistoricalImagery backend instead
     """
 
     name = "google"
-    max_zoom = 21
+    max_zoom = 20  # z21 exists but is just interpolated upscale
     min_zoom = 1
 
     def get_tile_url(self, x: int, y: int, z: int) -> str:

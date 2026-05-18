@@ -1,208 +1,239 @@
 """
 CLI interface for RS-image-api
+
 Usage:
-    python -m rs_image_api download --provider google --bbox 83.59,28.55,84.03,29.24 --zoom 19 -o output
-    python -m rs_image_api download --provider bing --shapefile regions.gpkg --zoom auto -o ./output_dir
-    python -m rs_image_api probe --provider google --lat 28.78 --lng 83.72
+    rs-image probe   --lat 28.78 --lng 83.72 [--backend gehi|bing|all]
+    rs-image batch   --input ./gpkg_dir/ --backend gehi -o ./output/
+    rs-image merge   --input ./output/ -o merged.vrt
+    rs-image info
+    rs-image download --provider google --bbox lng_min,lat_min,lng_max,lat_max -o ./output/
 """
 
 import argparse
-import csv
 import sys
-import time
 from pathlib import Path
 
-import geopandas as gpd
+from .providers import PROVIDERS
 
-from .providers import get_provider, PROVIDERS
-from .downloader import download_bbox, find_best_zoom
-from .tile_system import meters_per_pixel
-import requests
 
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-}
+def cmd_info(args):
+    """Show detected tools and configuration."""
+    from .config import find_gehi_exe, get_proj_lib
+
+    print("RS-image-api Configuration")
+    print("=" * 50)
+
+    gehi = find_gehi_exe()
+    print(f"  GEHistoricalImagery: {gehi or 'NOT FOUND'}")
+
+    proj = get_proj_lib()
+    print(f"  PROJ_LIB: {proj or 'NOT SET'}")
+
+    try:
+        import rasterio
+        print(f"  rasterio: {rasterio.__version__}")
+    except ImportError:
+        print("  rasterio: not installed (worldfile fallback)")
+
+    try:
+        import geopandas
+        print(f"  geopandas: {geopandas.__version__}")
+    except ImportError:
+        print("  geopandas: not installed")
+
+    print(f"\n  Tile providers: {', '.join(PROVIDERS.keys())}")
+    print(f"  Backends: gehi (Google Earth Historical), bing, google, esri")
 
 
 def cmd_probe(args):
-    """探测某坐标各 provider 的最高可用 zoom 和日期"""
-    print(f"\n探测坐标: ({args.lat}, {args.lng})")
+    """Probe imagery availability at a location."""
+    import requests
+    from .tile_system import meters_per_pixel
+
+    print(f"\nProbing ({args.lat}, {args.lng})")
     print("=" * 60)
 
-    providers_to_check = [args.provider] if args.provider != 'all' else list(PROVIDERS.keys())
+    backends = [args.backend] if args.backend != "all" else ["gehi", "bing", "google", "esri"]
 
-    session = requests.Session()
-    session.headers.update(HEADERS)
-
-    for pname in providers_to_check:
+    for backend in backends:
         try:
-            provider = get_provider(pname)
-        except Exception:
-            continue
+            if backend == "gehi":
+                from .gehi import gehi_find_best
+                result = gehi_find_best(args.lat, args.lng)
+                res = meters_per_pixel(args.lat, result["best_zoom"])
+                print(f"\n  [GE Historical]")
+                print(f"    Best zoom: {result['best_zoom']} ({res:.3f} m/px)")
+                print(f"    Latest date: {result['latest_date'] or 'N/A'}")
+                print(f"    Available dates: {len(result['all_dates'])}")
+                if result["all_dates"]:
+                    for d in result["all_dates"][-5:]:
+                        print(f"      {d}")
 
-        best_zoom = find_best_zoom(provider, args.lat, args.lng, session)
-        res = meters_per_pixel(args.lat, best_zoom)
+            elif backend in PROVIDERS:
+                from .providers import get_provider
+                from .downloader import find_best_zoom, get_capture_date
 
-        # 获取日期
-        from .downloader import get_capture_date
-        date_meta = get_capture_date(provider, args.lat, args.lng, best_zoom, session)
+                provider = get_provider(backend)
+                session = requests.Session()
+                session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
 
-        print(f"\n  [{pname.upper()}]")
-        print(f"    最高Zoom: {best_zoom}")
-        print(f"    分辨率: {res:.3f} m/pixel")
-        if date_meta:
-            for k, v in date_meta.items():
-                if v:
-                    print(f"    {k}: {v}")
+                zoom = find_best_zoom(provider, args.lat, args.lng, session)
+                res = meters_per_pixel(args.lat, zoom)
+                date_meta = get_capture_date(provider, args.lat, args.lng, zoom, session)
 
-    print()
+                print(f"\n  [{backend.upper()}]")
+                print(f"    Best zoom: {zoom} ({res:.3f} m/px)")
+                for k, v in date_meta.items():
+                    if v:
+                        print(f"    {k}: {v}")
+
+        except FileNotFoundError as e:
+            print(f"\n  [{backend.upper()}] {e}")
+        except Exception as e:
+            print(f"\n  [{backend.upper()}] Error: {e}")
+
+
+def cmd_batch(args):
+    """Batch probe + download from shapefile/gpkg directory."""
+    from .batch import collect_tasks, probe_tasks, save_plan, download_tasks
+
+    output_dir = Path(args.output)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Phase 1: Collect
+    tasks = collect_tasks(args.input)
+    print(f"\n{'=' * 60}")
+    print(f"RS-image-api Batch Download")
+    print(f"  Backend: {args.backend}")
+    print(f"  Input: {args.input} ({len(tasks)} regions)")
+    print(f"  Output: {output_dir}")
+    print(f"{'=' * 60}\n")
+
+    # Phase 2: Probe
+    print("Phase 1/2: Probing best zoom + date...")
+    probed = probe_tasks(tasks, backend=args.backend)
+
+    plan_path = output_dir / "download_plan.csv"
+    save_plan(probed, plan_path)
+    print(f"  Plan saved: {plan_path}")
+
+    # Summary
+    zooms = {}
+    for t in probed:
+        zooms[t.zoom] = zooms.get(t.zoom, 0) + 1
+    print(f"  Zoom distribution: {zooms}")
+
+    if args.probe_only:
+        print("\n--probe-only: stopping after probe phase")
+        return
+
+    # Phase 3: Download
+    print(f"\nPhase 2/2: Downloading {len(probed)} regions...")
+    results = download_tasks(probed, backend=args.backend, output_dir=output_dir)
+
+    success = sum(1 for r in results if r.get("success", False) or r.get("skipped", False))
+    fail = len(results) - success
+    print(f"\nDone! Success: {success}, Failed: {fail}")
+
+    # Auto-generate VRT
+    if success > 0:
+        from .merge import generate_vrt
+        try:
+            vrt_path = generate_vrt(output_dir)
+            print(f"VRT generated: {vrt_path}")
+        except Exception as e:
+            print(f"VRT generation skipped: {e}")
+
+
+def cmd_merge(args):
+    """Generate VRT or merge TIFFs."""
+    from .merge import generate_vrt
+
+    input_dir = Path(args.input)
+    output_path = Path(args.output) if args.output else None
+
+    vrt_path = generate_vrt(input_dir, output_path, pattern=args.pattern)
+    print(f"VRT generated: {vrt_path}")
 
 
 def cmd_download(args):
-    """下载影像"""
+    """Download imagery for a single bbox (tile-based)."""
+    from .providers import get_provider
+    from .downloader import download_bbox
+
     provider = get_provider(args.provider)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    zoom = None if args.zoom == 'auto' else int(args.zoom)
-
-    # 收集所有 bbox
-    tasks = []
+    zoom = None if args.zoom == "auto" else int(args.zoom)
 
     if args.bbox:
-        parts = [float(x) for x in args.bbox.split(',')]
-        bbox = tuple(parts)  # lng_min, lat_min, lng_max, lat_max
-        tasks.append(('custom_bbox', bbox))
-
-    elif args.shapefile:
-        shp_path = Path(args.shapefile)
-        if shp_path.is_dir():
-            # 目录模式：遍历所有 gpkg/shp
-            files = sorted(list(shp_path.glob('*.gpkg')) + list(shp_path.glob('*.shp')))
-        else:
-            files = [shp_path]
-
-        for f in files:
-            gdf = gpd.read_file(f)
-            bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
-            name = f.stem
-            tasks.append((name, tuple(bounds)))
-
+        parts = [float(x) for x in args.bbox.split(",")]
+        bbox = tuple(parts)
     else:
-        print("错误: 需要 --bbox 或 --shapefile 参数")
+        print("Error: --bbox required")
         sys.exit(1)
 
-    print(f"\n{'=' * 60}")
-    print(f"RS-image-api 影像下载")
-    print(f"  Provider: {provider.name}")
-    print(f"  Zoom: {zoom or 'auto'}")
-    print(f"  任务数: {len(tasks)}")
-    print(f"  输出: {output_dir}")
-    print(f"{'=' * 60}\n")
+    output_path = output_dir / f"download_{provider.name}"
 
-    # CSV 记录
-    csv_path = output_dir / 'metadata.csv'
-    csv_rows = []
+    result = download_bbox(
+        provider=provider, bbox=bbox,
+        output_path=output_path, zoom=zoom,
+    )
 
-    success = 0
-    fail = 0
-
-    for i, (name, bbox) in enumerate(tasks, 1):
-        # 检查已存在
-        existing = list(output_dir.glob(f"{name}_{provider.name}_z*.tif"))
-        if existing:
-            print(f"[{i}/{len(tasks)}] {name} - 跳过 (已存在)")
-            success += 1
-            continue
-
-        print(f"[{i}/{len(tasks)}] {name}...")
-
-        try:
-            # 确定输出文件名（下载后再根据 zoom 和年份重命名）
-            temp_name = f"{name}_{provider.name}_temp"
-            temp_path = output_dir / temp_name
-
-            result = download_bbox(
-                provider=provider,
-                bbox=bbox,
-                output_path=temp_path,
-                zoom=zoom,
-            )
-
-            # 重命名加上 zoom 和年份
-            year = result.get('capture_year', '')
-            actual_zoom = result['zoom']
-            final_name = f"{name}_{provider.name}_z{actual_zoom}"
-            if year:
-                final_name += f"_{year}"
-
-            # 重命名文件
-            for suffix in ['.tif', '.tfw', '.prj']:
-                src = (output_dir / temp_name).with_suffix(suffix)
-                dst = (output_dir / final_name).with_suffix(suffix)
-                if src.exists():
-                    src.rename(dst)
-
-            result['filename'] = f"{final_name}.tif"
-            result['name'] = name
-            csv_rows.append(result)
-            success += 1
-
-            res_str = f"{result['resolution_m']:.2f}m/px"
-            size_str = f"{result['file_size_mb']:.1f}MB"
-            date_str = f", {year}" if year else ""
-            print(f"  [OK] {result['width_px']}x{result['height_px']}px, z{actual_zoom}, "
-                  f"{res_str}, {size_str}{date_str}")
-
-        except Exception as e:
-            print(f"  [FAIL] Error: {e}")
-            fail += 1
-
-    # 写 CSV
-    if csv_rows:
-        fieldnames = list(csv_rows[0].keys())
-        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(csv_rows)
-
-    print(f"\n{'=' * 60}")
-    print(f"完成! 成功: {success}, 失败: {fail}")
-    if csv_rows:
-        print(f"元数据: {csv_path}")
-    print(f"输出目录: {output_dir}")
+    print(f"  {result['width_px']}x{result['height_px']}px, z{result['zoom']}, "
+          f"{result['resolution_m']:.2f}m/px, {result['file_size_mb']:.1f}MB")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='RS-image-api: Multi-source Remote Sensing Imagery Downloader'
+        prog="rs-image",
+        description="RS-image-api: Multi-source Remote Sensing Imagery Downloader",
     )
-    subparsers = parser.add_subparsers(dest='command')
+    subparsers = parser.add_subparsers(dest="command")
 
-    # probe 子命令
-    probe_parser = subparsers.add_parser('probe', help='探测可用影像')
-    probe_parser.add_argument('--lat', type=float, required=True)
-    probe_parser.add_argument('--lng', type=float, required=True)
-    probe_parser.add_argument('--provider', default='all',
-                              choices=['all'] + list(PROVIDERS.keys()))
+    # info
+    subparsers.add_parser("info", help="Show detected tools and configuration")
 
-    # download 子命令
-    dl_parser = subparsers.add_parser('download', help='下载影像')
-    dl_parser.add_argument('--provider', required=True, choices=list(PROVIDERS.keys()))
-    dl_parser.add_argument('--bbox', help='lng_min,lat_min,lng_max,lat_max')
-    dl_parser.add_argument('--shapefile', help='Shapefile/GeoPackage 路径或目录')
-    dl_parser.add_argument('--zoom', default='auto', help='Zoom level (auto/数字)')
-    dl_parser.add_argument('-o', '--output', default='./output', help='输出目录')
+    # probe
+    probe_p = subparsers.add_parser("probe", help="Check imagery availability")
+    probe_p.add_argument("--lat", type=float, required=True)
+    probe_p.add_argument("--lng", type=float, required=True)
+    probe_p.add_argument("--backend", default="all",
+                         choices=["all", "gehi", "bing", "google", "esri"])
+
+    # batch
+    batch_p = subparsers.add_parser("batch", help="Batch probe + download")
+    batch_p.add_argument("--input", "-i", required=True, help="Shapefile/GeoPackage path or directory")
+    batch_p.add_argument("--backend", "-b", default="gehi",
+                         choices=["gehi", "bing", "google", "esri"])
+    batch_p.add_argument("--output", "-o", default="./output", help="Output directory")
+    batch_p.add_argument("--probe-only", action="store_true", help="Only probe, don't download")
+
+    # merge
+    merge_p = subparsers.add_parser("merge", help="Generate VRT from downloaded TIFFs")
+    merge_p.add_argument("--input", "-i", required=True, help="Directory containing TIFFs")
+    merge_p.add_argument("--output", "-o", help="Output VRT path")
+    merge_p.add_argument("--pattern", default="*.tif", help="Glob pattern for TIFFs")
+
+    # download (single bbox, tile-based)
+    dl_p = subparsers.add_parser("download", help="Download single bbox (tile-based)")
+    dl_p.add_argument("--provider", required=True, choices=list(PROVIDERS.keys()))
+    dl_p.add_argument("--bbox", help="lng_min,lat_min,lng_max,lat_max")
+    dl_p.add_argument("--zoom", default="auto")
+    dl_p.add_argument("-o", "--output", default="./output")
 
     args = parser.parse_args()
 
-    if args.command == 'probe':
+    if args.command == "info":
+        cmd_info(args)
+    elif args.command == "probe":
         cmd_probe(args)
-    elif args.command == 'download':
+    elif args.command == "batch":
+        cmd_batch(args)
+    elif args.command == "merge":
+        cmd_merge(args)
+    elif args.command == "download":
         cmd_download(args)
     else:
         parser.print_help()
-
-
-if __name__ == '__main__':
-    main()
